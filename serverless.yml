@@ -1,0 +1,248 @@
+service: sending-messages-fault-lake
+
+provider:
+  name: aws
+  deploymentBucket: ${file(serverless/cfn.yml):deploymentBucket}
+  #iam:
+    #deploymentRole: ${file(serverless/cfn.yml):deploymentRole}
+  #stackTags: ${file(serverless/tags.yml)}
+
+params: ${file(serverless/config.yml):params}
+custom: ${file(serverless/config.yml):custom}
+
+resources:
+  #- ${file(serverless/s3.yml):resources}
+  #- ${file(serverless/firehose.yml):resources}
+  #- ${file(serverless/conditions.yml)}
+  Resources:
+    LogGroup: 
+        Type: AWS::Logs::LogGroup
+        Properties:
+          LogGroupName: ${self:service}-kinesis-firehose-${self:custom.stage}
+          #RetentionInDays: ${param:logRetentionInDays}
+
+    LogStream:
+      Type: AWS::Logs::LogStream
+      DependsOn: LogGroup
+      Properties:
+        LogGroupName:
+          Ref: LogGroup
+        LogStreamName: ${self:service}
+
+    DeliveryStream:
+      Type: AWS::KinesisFirehose::DeliveryStream
+      DependsOn: [FaultLake, LogStream, LogGroup, DeliveryRole]
+      Properties:
+        DeliveryStreamType: DirectPut
+        ExtendedS3DestinationConfiguration:
+          BucketARN:
+            Fn::GetAtt: [ FaultLake, Arn ]
+          Prefix: ${opt:region}/
+          BufferingHints:
+            IntervalInSeconds: 60
+            SizeInMBs: 50
+          CompressionFormat: GZIP
+          RoleARN:
+            Fn::GetAtt: [ DeliveryRole, Arn ]
+          CloudWatchLoggingOptions: 
+            Enabled: true
+            LogGroupName:
+              Ref: LogGroup
+            LogStreamName:
+              Ref: LogStream
+
+    DeliveryStreamRole:
+      Type: AWS::IAM::Role
+      DependsOn: DeliveryStream
+      Properties:
+        AssumeRolePolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: sns.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:               
+          - PolicyName: ${self:service}-subscription-role-policy-${self:custom.stage}
+            PolicyDocument:
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - firehose:DescribeDeliveryStream
+                    - firehose:ListDeliveryStreams
+                    - firehose:ListTagsForDeliveryStream
+                    - firehose:PutRecord
+                    - firehose:PutRecordBatch
+                  Resource:
+                    - Fn::GetAtt: [ DeliveryStream, Arn ]
+    DeliveryRole:
+      Type: AWS::IAM::Role
+      DependsOn: [FaultLake, LogGroup]
+      Properties:
+        AssumeRolePolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: firehose.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:               
+          - PolicyName: delivery
+            PolicyDocument:
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:AbortMultipartUpload
+                    - s3:GetBucketLocation
+                    - s3:GetObject
+                    - s3:ListBucket
+                    - s3:ListBucketMultipartUploads
+                    - s3:PutObject
+                  Resource:
+                    - Fn::GetAtt: [ FaultLake, Arn ]
+                    - Fn::Join:
+                        - /
+                        - - Fn::GetAtt: [ FaultLake, Arn ]
+                          - '*'
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogStream
+                    - logs:CreateLogGroup
+                    - logs:PutLogEvents
+                  Resource:
+                    - Fn::GetAtt: [ LogGroup, Arn ]
+
+    FaultTopicSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        Protocol: firehose
+        Endpoint:
+          Fn::GetAtt: [ DeliveryStream, Arn ]
+        SubscriptionRoleArn:
+          Fn::GetAtt: [ DeliveryStreamRole, Arn ]
+        TopicArn: !ImportValue "sending-messages-error-topic-arn"
+        # RedrivePolicy:
+        #   deadLetterTargetArn:
+        #     Fn::GetAtt: [ DeliveryStreamSubscriptionDLQ, Arn ]
+
+    FaultLake:
+      Type: AWS::S3::Bucket
+      DeletionPolicy: Retain
+      Properties:
+        BucketName: ${self:service}-${self:custom.stage}
+        PublicAccessBlockConfiguration:
+          RestrictPublicBuckets: true
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+        VersioningConfiguration:
+          Status: Enabled
+        # LifecycleConfiguration: # lifecycle of objects in s3, delete after certain number of days
+        #   Rules:
+        #     - Prefix: ''
+        #       Status: Enabled
+        #       ExpirationInDays: 92
+        # # Replication depends on self being deployed already to mirroring region
+        # ReplicationConfiguration:
+        #   Fn::If:
+        #     - IsReplicationRegionDeployed
+        #     - Role: !Sub 'arn:${AWS::Partition}:iam::${aws:accountId}:role/${self:custom.replication.roleName}'
+        #       Rules:
+        #         - Destination:
+        #             FaultLake: ${self:custom.replication.bucketArn}
+        #           Status: Enabled
+        #           Prefix: ''
+        #     - !Ref 'AWS::NoValue'
+
+    # BucketReplicationRole:
+    #   DependsOn: FaultLake
+    #   Type: AWS::IAM::Role
+    #   Properties:
+    #     RoleName: ${self:custom.replication.roleName}
+    #     AssumeRolePolicyDocument:
+    #       Statement:
+    #         - Effect: Allow
+    #           Principal:
+    #             Service:
+    #               - s3.amazonaws.com
+    #           Action:
+    #             - sts:AssumeRole
+    #     Policies:
+    #       - PolicyName: replicate
+    #         PolicyDocument:
+    #           Statement:
+    #             - Effect: Allow
+    #               Action:
+    #                 - s3:GetReplicationConfiguration
+    #                 - s3:ListBucket
+    #               Resource:
+    #                 Fn::GetAtt: [ FaultLake, Arn ]
+    #             - Effect: Allow
+    #               Action:
+    #                 - s3:GetObjectVersion
+    #                 - s3:GetObjectVersionAcl
+    #               Resource:
+    #                 - Fn::Join:
+    #                   - ''
+    #                   - - Fn::GetAtt: [ FaultLake, Arn ]
+    #                     - '*'
+    #             - Effect: Allow
+    #               Action:
+    #                 - s3:ReplicateObject
+    #                 - s3:ReplicateDelete
+    #                 - s3:ObjectOwnerOverrideToBucketOwner
+    #               Resource: ${self:custom.replication.bucketArn}/*
+
+
+    FaultLakePolicy:
+      Type: AWS::S3::BucketPolicy
+      DependsOn: FaultLake
+      Properties: 
+        Bucket: !Ref FaultLake
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Action:
+                - 's3:DeleteBucketPolicy'
+                - 's3:PutBucketPolicy'
+              Effect: Deny
+              Resource: !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref FaultLake
+              Principal: "*"
+              Condition:
+                ArnNotEquals:
+                  aws:PrincipalARN:
+                  - !Sub 'arn:aws:iam::167345660221:user/Alex'
+            - Action:
+                - 's3:DeleteObject*'
+              Effect: Allow
+              Resource: !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref FaultLake
+                  - '/*'
+              Principal: "*"
+  #         - Effect: Allow
+  #           Principal:
+  #             AWS: !Sub 'arn:${AWS::Partition}:iam::${aws:accountId}:root'
+  #           Action:
+  #             - s3:ReplicateDelete
+  #             - s3:ReplicateObject
+  #             - s3:ObjectOwnerOverrideToBucketOwner
+  #           Resource:
+  #             - Fn::Join:
+  #               - ''
+  #               - - Fn::GetAtt: [ FaultLake, Arn ]
+  #                 - '/*'
+
+  Outputs:
+    BucketName:
+      Value:
+        Ref: FaultLake
+    BucketArn:
+      Value:
+        Fn::GetAtt: [ FaultLake, Arn ]

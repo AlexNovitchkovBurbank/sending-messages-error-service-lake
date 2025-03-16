@@ -1,0 +1,31 @@
+{
+  "name": "sending-messages-fault-lake",
+  "private": true,
+  "scripts": {
+    "clean": "rm -rf .serverless/",
+    "pretest": "npm run clean",
+    "test": "sls package -r us-west-1 -s np",
+    "test:ci": "eval \"$(assume-role) npm test\"",
+    "test:sls": "npm test",
+    "test:sls:ci": "eval \"$(assume-role) npm run test:sls\"",
+    "dp:np:e": "sls deploy --verbose -r us-east-1 -s np --force",
+    "dp:np:w": "sls deploy --verbose -r us-west-2 -s np --force",
+    "rm:np:w": "sls remove -r us-west-2 -s np",
+    "dp:prd:e": "sls deploy --verbose -r us-east-1 -s prd --force",
+    "dp:prd:w": "sls deploy --verbose -r us-west-2 -s prd --force",
+    "dp:np:e:ci": "eval \"$(assume-role) npm run dp:np:e\"",
+    "dp:np:w:ci": "eval \"$(assume-role) npm run dp:np:w\"",
+    "dp:prd:e:ci": "eval \"$(assume-role) npm run dp:prd:e\"",
+    "dp:prd:w:ci": "eval \"$(assume-role) npm run dp:prd:w\"",
+    "removeBucket:w": "aws s3api delete-bucket --bucket sending-messages-fault-lake-dev --region us-west-2",
+    "removeBucketFiles:w": "aws s3 rm s3://sending-messages-fault-lake-$STAGE --recursive"
+  },
+  "devDependencies": {
+    "aws-assume-role-cicd": "^1.0.0",
+    "find-up": "^3.0.0",
+    "serverless": "^3.0.0"
+  },
+  "dependencies": {
+    "serverless-dotenv-plugin": "^6.0.0"
+  }
+}
